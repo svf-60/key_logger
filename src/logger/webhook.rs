@@ -2,7 +2,7 @@ use std::{sync::mpsc, thread};
 
 use serde::Serialize;
 
-const WEBHOOK_URL: &'static str = "https://discord.com/api/webhooks/1491276301904908470/1WlqsWVH6mmVg9geyKKvRlNYBiLkQNdokVQcf_zs01yeq2_2GjEehYhdrY2kPqxkR4e8";
+const WEBHOOK_URL: &'static str = "";
 
 #[derive(Serialize)]
 struct WebhookBody {
